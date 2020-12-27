@@ -1,0 +1,167 @@
+###IMPORT DEPENDENCIES###
+
+from bs4 import BeautifulSoup as bs 
+from urllib.parse import urljoin 
+import time 
+import requests 
+import pandas as pd 
+import re 
+from datetime import datetime as dt
+import datetime
+import os 
+import sqlite3
+from email.mime.text import MIMEText
+from email.mime.application import MIMEApplication
+from email.mime.multipart import MIMEMultipart
+from smtplib import SMTP
+import smtplib
+import sys
+
+# Get the urls 
+price_min = 500
+price_max = 800
+pages = [x for x in range(11)] #get the first 10 pages
+uris = []
+count = 0
+
+for page in pages:
+  try:
+    time.sleep(3) 
+    #get the url of each listing 
+    r = requests.get(f'https://www.###########.com/real-estate/houses-and-villas-rent/furnishing---1/lefkosia-district-nicosia/?page={page}&price_min={price_min}&price_max={price_max}')
+    soup = bs(r.content) #parse it as a bs object 
+    ads = soup.find_all(class_='mask')
+    for ad in ads:
+      uris.append(ad.get('href'))
+      count +=1
+  except Exception as e:
+    print(e)
+    #continue 
+
+print(f'{count} ads were found.')
+
+
+#Get each apartment's info 
+def get_ad_info(url):
+  ads = {}
+  r = requests.get(url)
+  soup = bs(r.content)
+
+  description = soup.find(class_='announcement-characteristics')
+  characteristics = description.find_all(class_= 'key-chars')
+  chars = soup.find_all(class_ = 'value-chars')
+  
+  ds = {}
+  for i,char in zip(characteristics,chars):
+    ds.update({i.get_text() : char.get_text()})
+
+  ads['location'] = soup.find(class_="announcement-meta__left").get_text()
+  ads['title'] = soup.find(class_="title-announcement").get_text()
+  ads['price'] = soup.find(class_="announcement-price").get_text()
+  ads['bedrooms'] = ds.get('Bedrooms')
+  ads['bathrooms'] = ds.get('Bathrooms')
+  ads['image_url'] = soup.find(class_ ="js-image-show-full").get('src')
+  ads['url'] = full_url  
+  return ads 
+
+
+base_url = 'https://www.###########.com' #define base url 
+ls = []
+for uri in uris:
+  try:
+    full_url = base_url + uri #join the base url with its uri  
+    ls.append(get_ad_info(full_url))
+  except Exception as e:
+    print(uri.split('_')[0] + ' with error as '  +  str(e)) #print exceptions 
+    continue  
+    
+df = pd.DataFrame(ls) #add the data to a df
+df = df.drop_duplicates() #remove any duplicate values 
+
+
+###DATA WRANGLING###
+def data_wrangling(df):
+  df['price'] = df['price'].astype(str).str.extract('(\d+)').astype(int) #extarct the price 
+  df = df.loc[df['price'] > 10] #remove any errors in price 
+  df['date'] = df['location'].astype(str).str.split('Posted: ').str[-1]
+  df['date'] = df['date'].astype(str).str.split(' ').str[0]
+
+  today = datetime.date.today().strftime('%d.%m.%Y') #define today's day
+  yesterday = (datetime.date.today() - datetime.timedelta(days=1)).strftime('%d.%m.%Y') #define yesterday's date 
+  df['date'] = df['date'].replace("Today",today) #replace "today" as post-date with the current date 
+
+  df['date'] = df['date'].replace("Yesterday",yesterday) #replace "yesterday" as post-date with the current date 
+
+  df['area'] = df['location'].astype(str).str.split('district,').str[-1] #get the location str
+  df['area'] = df['area'].astype(str).str.split('Posted:').str[0] #get the area str
+
+  df['date'] = pd.to_datetime(df['date'], format='%d.%m.%Y') #format the date 
+
+  df = df.sort_values(by='date', ascending=False) # sort descending 
+  #del df['location']
+
+  df = df.replace('\n','', regex=True) #remove the \n char 
+  return df
+
+df = data_wrangling(df)
+
+###CREATING THE INITIAL CSV FILE###
+#df.to_csv('/content/drive/My Drive/Nicosia Rent Prices.csv', index = False, encoding = 'utf-8')
+
+
+###APPENDING TO THE INITIAL CSV FILE###
+
+df.to_csv('Nicosia Rent Prices.csv', mode='a', header=False, index = False)
+#Opening the file that now contains the appended data 
+df_unique = pd.read_csv('Nicosia Rent Prices.csv')
+#Keep the newest record of each entry 
+df_unique = df.sort_values('date').drop_duplicates(['location','title','url'],keep='last')
+#Save the new files 
+df_unique.to_csv('Nicosia Rent Prices.csv', index = False, encoding = 'utf-8')
+
+
+###SAVING THE RESULTS IN A DATABASE(optional)###  
+
+conn = sqlite3.connect('Nicosia_properties.db') #creating the db
+c = conn.cursor() #creating the cursor 
+df_unique.to_sql('apartments_in_Nicosia', conn, if_exists ='replace', index = True) #appending the data
+
+conn.commit() #commit changes 
+
+c.execute('Select * from apartments_in_Nicosia')
+results = c.fetchall()
+#printing the results in new line
+#for result in results:
+#  print(result)
+
+
+###SEND THE DF VIA EMAIL(optional)###
+'''
+recipients = 'recipient@gmail.com' #user/list of users 
+emaillist = [elem.strip().split(',') for elem in recipients]
+msg = MIMEMultipart()
+msg['Subject'] = "Today's Rent Prices"
+msg['From'] = 'sender@gmail.com'
+
+gmail_user = #####
+gmail_password = ####
+
+html = """\
+<html>
+  <head></head>
+  <body>
+    {0}
+  </body>
+</html>
+""".format(df_unique.to_html()) #parse the df to html 
+
+part1 = MIMEText(html, 'html') 
+msg.attach(part1)
+
+with smtplib.SMTP('smtp.gmail.com',587) as smtp:
+  smtp.ehlo()
+  smtp.starttls()
+  smtp.ehlo()
+  smtp.login(gmail_user, gmail_password)
+  smtp.sendmail(msg['From'], emaillist , msg.as_string())
+'''
